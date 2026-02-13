@@ -2,11 +2,13 @@
 __pycache__/
 *.py[cod]
 *$py.class
+*.pyc
 
 # Virtual environments
 .venv/
 venv/
 ENV/
+myenv/
 
 # Packaging
 build/
