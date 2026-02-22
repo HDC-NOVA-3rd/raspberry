@@ -6,3 +6,5 @@ RPi.GPIO
 python-dotenv
 requests
 adafruit-circuitpython-dht
+gTTS
+pygame
