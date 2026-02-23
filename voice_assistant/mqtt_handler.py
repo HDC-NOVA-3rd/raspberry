@@ -89,6 +89,7 @@ class MqttHandler:
         """Connect and start the network loop in a daemon thread."""
         log.info("MQTT connecting to %s:%d …", self._broker_host, self._broker_port)
         try:
+            self._client.reconnect_delay_set(min_delay=2, max_delay=30)
             self._client.connect(self._broker_host, self._broker_port, keepalive=60)
         except Exception as exc:
             raise MqttError(f"MQTT 연결 실패: {exc}") from exc
@@ -163,7 +164,7 @@ class MqttHandler:
 
     def _on_disconnect(self, client, userdata, rc):
         if rc != 0:
-            log.warning("MQTT unexpected disconnect (rc=%d), auto-reconnect", rc)
+            log.warning("MQTT disconnected (rc=%d) — will auto-reconnect (2~30s)", rc)
 
     def _on_message(self, client, userdata, msg):
         topic = msg.topic

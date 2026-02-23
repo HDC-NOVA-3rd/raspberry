@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import signal
+import time
 
 from .audio import AudioSettings, VADRecorder
 from .config import AssistantConfig
@@ -37,6 +38,8 @@ class VoiceAssistantPipeline:
             mode=config.wakeword_mode,
             porcupine_access_key=config.porcupine_access_key,
             porcupine_keyword=config.porcupine_keyword,
+            porcupine_sensitivity=config.porcupine_sensitivity,
+            wakeword_input_device=config.wakeword_input_device,
         )
 
         self._recorder = VADRecorder(
@@ -99,6 +102,8 @@ class VoiceAssistantPipeline:
         try:
             log.info("wake-word waiting")
             self._wakeword.wait()
+            if not self._running:
+                return
         except VoiceAssistantError:
             raise
         except Exception as exc:
@@ -106,6 +111,8 @@ class VoiceAssistantPipeline:
             return
 
         self._tts.speak(self._cfg.greeting_text)
+        # TTS 잔향이 마이크에 잡혀 캘리브레이션을 오염시키지 않도록 잠시 대기
+        time.sleep(0.5)
 
         try:
             wav = self._recorder.record_until_silence()
@@ -131,12 +138,6 @@ class VoiceAssistantPipeline:
         tts_text = (result.tts_text or "").strip()
         answer_text = (result.answer or "").strip()
         reply = tts_text if tts_text else answer_text
-        log.info(
-            "voice reply fields: tts_len=%d answer_len=%d selected=%s",
-            len(tts_text),
-            len(answer_text),
-            "ttsText" if tts_text else "answer",
-        )
         if reply:
             ok = self._tts.speak(reply)
             if not ok:
@@ -149,9 +150,9 @@ class VoiceAssistantPipeline:
             self._session_id = result.session_id
 
         log.info(
-            "turn complete: intent=%s text=%s",
-            result.intent,
-            result.recognized_text[:60] if result.recognized_text else "",
+            "turn complete — intent=%s | recognized: %s",
+            result.intent or "(none)",
+            (result.recognized_text or "")[:60] or "(empty)",
         )
 
     @staticmethod
@@ -167,6 +168,7 @@ class VoiceAssistantPipeline:
     def _signal_handler(self, signum, frame) -> None:
         log.info("signal %d received, shutting down", signum)
         self._running = False
+        self._wakeword.stop()
 
     def _shutdown(self) -> None:
         log.info("shutting down")

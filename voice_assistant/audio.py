@@ -66,8 +66,9 @@ class VADRecorder:
         self._min_speech = max(1, settings.min_speech_ms // settings.frame_duration_ms)
         self._max_frames = int(settings.max_record_seconds * 1000 / settings.frame_duration_ms)
         # Fallback thresholds for environments where VAD misses real speech.
-        self._start_level_threshold = 220
-        self._accept_level_threshold = 120
+        self._start_level_threshold = 180
+        self._accept_level_threshold = 90
+        self._end_level_threshold = 70
 
     # ---- internal frame generator -------------------------------------------
 
@@ -106,10 +107,16 @@ class VADRecorder:
         within the maximum recording window.
         """
         pre_roll: deque[bytes] = deque(maxlen=10)
+        pre_levels: list[int] = []
         recorded: list[bytes] = []
         started = False
         speech_count = 0
         silence_run = 0
+
+        # Calibrate noise floor from first 30 frames (~0.9s) before speech starts
+        _calibrated = False
+        start_level_threshold = self._start_level_threshold
+        end_level_threshold = self._end_level_threshold
 
         for idx, frame in enumerate(self._frames()):
             is_speech = self._vad.is_speech(frame, self._s.sample_rate)
@@ -117,9 +124,37 @@ class VADRecorder:
             pre_roll.append(frame)
 
             if not started:
-                if is_speech or level >= self._start_level_threshold:
-                    if not is_speech:
-                        log.info("VAD missed start. starting by energy level=%d", level)
+                if not _calibrated:
+                    pre_levels.append(level)
+                    if len(pre_levels) >= 30:
+                        pre_levels.sort()
+                        noise_floor = pre_levels[len(pre_levels) // 2]
+                        # 노이즈 최댓값도 고려 (중앙값 대신 상위 80% 사용)
+                        noise_p80 = pre_levels[int(len(pre_levels) * 0.8)]
+                        # start: 음성이 노이즈보다 확실히 커야 트리거
+                        start_level_threshold = max(
+                            self._start_level_threshold,
+                            int(noise_p80 * 2.5),
+                        )
+                        # end: 묵음 판정 기준 (노이즈 p80 * 1.6)
+                        end_level_threshold = max(
+                            self._end_level_threshold,
+                            int(noise_p80 * 1.6),
+                        )
+                        _calibrated = True
+                        log.debug(
+                            "noise floor calibrated: median=%d p80=%d start_thr=%d end_thr=%d",
+                            noise_floor, noise_p80, start_level_threshold, end_level_threshold,
+                        )
+                    else:
+                        # 캘리브레이션 미완료 — 트리거 검사 건너뜀
+                        continue
+
+                # 시작 조건: 에너지 레벨 기반 (VAD는 노이즈에 취약하므로 보조 수단)
+                energy_trigger = level >= start_level_threshold
+                if energy_trigger:
+                    log.debug("recording started: level=%d vad=%s start_thr=%d end_thr=%d",
+                              level, is_speech, start_level_threshold, end_level_threshold)
                     started = True
                     recorded.extend(pre_roll)
                     speech_count += 1
@@ -128,7 +163,9 @@ class VADRecorder:
                 continue
 
             recorded.append(frame)
-            if is_speech:
+            # 묵음 판정은 순수 레벨 기반 (VAD가 노이즈에 항상 True 반환하는 환경 대응)
+            is_active_speech = level >= end_level_threshold
+            if is_active_speech:
                 speech_count += 1
                 silence_run = 0
             else:
@@ -142,13 +179,12 @@ class VADRecorder:
         if speech_count < self._min_speech:
             avg_level = self._avg_level(recorded)
             if recorded and avg_level >= self._accept_level_threshold:
-                log.info(
-                    "low VAD confidence (speech_frames=%d) but accepting by energy avg=%d",
-                    speech_count,
-                    avg_level,
+                log.debug(
+                    "low VAD confidence (speech_frames=%d) accepted by energy avg=%d",
+                    speech_count, avg_level,
                 )
             else:
-                log.info("speech too short (%d frames), discarding", speech_count)
+                log.debug("speech too short (%d frames), discarding", speech_count)
                 return None
 
         pcm = b"".join(recorded)

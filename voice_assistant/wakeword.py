@@ -5,6 +5,7 @@ from __future__ import annotations
 import abc
 import logging
 import queue
+import threading
 from array import array
 
 import sounddevice as sd
@@ -23,6 +24,9 @@ class WakeWordDetector(abc.ABC):
 
     @abc.abstractmethod
     def wait(self) -> None: ...
+
+    def stop(self) -> None:
+        """Request wait loop to stop ASAP. Override if needed."""
 
     def cleanup(self) -> None:
         """Release resources.  Override if needed."""
@@ -46,7 +50,13 @@ class ManualWakeWordDetector(WakeWordDetector):
 class PorcupineWakeWordDetector(WakeWordDetector):
     """Production mode — Picovoice Porcupine on-device hot-word."""
 
-    def __init__(self, access_key: str, keyword: str) -> None:
+    def __init__(
+        self,
+        access_key: str,
+        keyword: str,
+        sensitivity: float = 0.65,
+        input_device: int | None = None,
+    ) -> None:
         try:
             import pvporcupine  # type: ignore[import-untyped]
         except ImportError as exc:
@@ -57,13 +67,24 @@ class PorcupineWakeWordDetector(WakeWordDetector):
         if not access_key.strip():
             raise WakeWordError("PORCUPINE_ACCESS_KEY 필수")
 
+        sens = max(0.0, min(1.0, float(sensitivity)))
+
         self._porcupine = pvporcupine.create(
             access_key=access_key.strip(),
             keywords=[keyword.strip() or "porcupine"],
+            sensitivities=[sens],
         )
-        log.info("porcupine initialised (keyword=%s)", keyword)
+        self._input_device = input_device
+        self._stop_requested = threading.Event()
+        log.info(
+            "porcupine initialised (keyword=%s, sensitivity=%.2f, input_device=%s)",
+            keyword,
+            sens,
+            input_device if input_device is not None else "default",
+        )
 
     def wait(self) -> None:
+        self._stop_requested.clear()
         fl = self._porcupine.frame_length
         q: queue.Queue[bytes] = queue.Queue()
 
@@ -72,20 +93,41 @@ class PorcupineWakeWordDetector(WakeWordDetector):
                 log.warning("wakeword mic status: %s", status)
             q.put(bytes(indata))
 
-        with sd.RawInputStream(
-            samplerate=self._porcupine.sample_rate,
-            blocksize=fl,
-            channels=1,
-            dtype="int16",
-            callback=_cb,
-        ):
-            while True:
-                raw = q.get()
-                if len(raw) != fl * 2:
-                    continue
-                if self._porcupine.process(array("h", raw)) >= 0:
-                    log.info("wake-word detected!")
-                    return
+        def _listen(device_index: int | None) -> None:
+            with sd.RawInputStream(
+                samplerate=self._porcupine.sample_rate,
+                blocksize=fl,
+                channels=1,
+                dtype="int16",
+                device=device_index,
+                callback=_cb,
+            ):
+                while not self._stop_requested.is_set():
+                    try:
+                        raw = q.get(timeout=0.2)
+                    except queue.Empty:
+                        continue
+                    if len(raw) != fl * 2:
+                        continue
+                    if self._porcupine.process(array("h", raw)) >= 0:
+                        log.info("wake-word detected!")
+                        return
+
+        try:
+            _listen(self._input_device)
+        except Exception as exc:
+            if self._input_device is not None:
+                log.warning(
+                    "wakeword input_device=%s open failed (%s). retrying default input device",
+                    self._input_device,
+                    exc,
+                )
+                _listen(None)
+                return
+            raise
+
+    def stop(self) -> None:
+        self._stop_requested.set()
 
     def cleanup(self) -> None:
         if self._porcupine is not None:
@@ -101,11 +143,18 @@ def build_wakeword_detector(
     mode: str,
     porcupine_access_key: str = "",
     porcupine_keyword: str = "porcupine",
+    porcupine_sensitivity: float = 0.65,
+    wakeword_input_device: int | None = None,
 ) -> WakeWordDetector:
     """Return the appropriate detector for *mode* ('manual' | 'porcupine')."""
     mode = (mode or "manual").strip().lower()
     if mode == "manual":
         return ManualWakeWordDetector()
     if mode == "porcupine":
-        return PorcupineWakeWordDetector(porcupine_access_key, porcupine_keyword)
+        return PorcupineWakeWordDetector(
+            porcupine_access_key,
+            porcupine_keyword,
+            porcupine_sensitivity,
+            wakeword_input_device,
+        )
     raise WakeWordError(f"지원하지 않는 WAKEWORD_MODE: {mode!r}")
