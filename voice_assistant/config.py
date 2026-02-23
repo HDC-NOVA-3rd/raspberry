@@ -28,6 +28,13 @@ def _env_float(name: str, default: float) -> float:
     return default if raw is None or raw.strip() == "" else float(raw)
 
 
+def _env_optional_int(name: str) -> int | None:
+    raw = os.getenv(name)
+    if raw is None or raw.strip() == "":
+        return None
+    return int(raw)
+
+
 def _env_bool(name: str, default: bool) -> bool:
     raw = os.getenv(name)
     if raw is None or raw.strip() == "":
@@ -56,6 +63,8 @@ class AssistantConfig:
     wakeword_mode: str                 # "manual" | "porcupine"
     porcupine_access_key: str
     porcupine_keyword: str
+    porcupine_sensitivity: float       # 0.0-1.0
+    wakeword_input_device: int | None  # sounddevice input device index
 
     # ── Audio / VAD ─────────────────────────────────────────────────────
     sample_rate: int
@@ -99,6 +108,8 @@ class AssistantConfig:
             wakeword_mode=_env("WAKEWORD_MODE", "manual").lower(),
             porcupine_access_key=_env("PORCUPINE_ACCESS_KEY", ""),
             porcupine_keyword=_env("PORCUPINE_KEYWORD", "porcupine"),
+            porcupine_sensitivity=_env_float("PORCUPINE_SENSITIVITY", 0.65),
+            wakeword_input_device=_env_optional_int("WAKEWORD_INPUT_DEVICE"),
             # Audio / VAD
             sample_rate=_env_int("SAMPLE_RATE", 16000),
             vad_aggressiveness=_env_int("VAD_AGGRESSIVENESS", 2),

@@ -102,6 +102,9 @@ python -m voice_assistant
 | `MQTT_CLIENT_ID`     | `pi-voice-01` | MQTT 클라이언트 ID            |
 | `MQTT_VOICE_TIMEOUT` | `15`          | 음성 응답 대기 시간 (초)      |
 | `WAKEWORD_MODE`      | `manual`      | `manual` / `porcupine`        |
+| `PORCUPINE_KEYWORD`  | `porcupine`   | Porcupine 기본 키워드         |
+| `PORCUPINE_SENSITIVITY` | `0.65`     | 웨이크워드 감도 (`0.0~1.0`)   |
+| `WAKEWORD_INPUT_DEVICE` | (비움)     | 마이크 입력 장치 인덱스 고정  |
 | `SAMPLE_RATE`        | `16000`       | 오디오 샘플레이트 (Hz)        |
 | `SILENCE_MS`         | `700`         | 발화 종료 판정 무음 구간 (ms) |
 | `MAX_RECORD_SECONDS` | `12`          | 최대 녹음 길이 (초)           |
