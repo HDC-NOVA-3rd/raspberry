@@ -68,12 +68,20 @@ class PorcupineWakeWordDetector(WakeWordDetector):
             raise WakeWordError("PORCUPINE_ACCESS_KEY 필수")
 
         sens = max(0.0, min(1.0, float(sensitivity)))
+        kw = keyword.strip()
 
-        self._porcupine = pvporcupine.create(
-            access_key=access_key.strip(),
-            keywords=[keyword.strip() or "porcupine"],
-            sensitivities=[sens],
-        )
+        if kw.endswith(".ppn"):
+            self._porcupine = pvporcupine.create(
+                access_key=access_key.strip(),
+                keyword_paths=[kw],
+                sensitivities=[sens],
+            )
+        else:
+            self._porcupine = pvporcupine.create(
+                access_key=access_key.strip(),
+                keywords=[kw or "porcupine"],
+                sensitivities=[sens],
+            )
         self._input_device = input_device
         self._stop_requested = threading.Event()
         log.info(
