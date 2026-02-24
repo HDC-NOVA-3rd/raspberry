@@ -71,11 +71,33 @@ class PorcupineWakeWordDetector(WakeWordDetector):
         kw = keyword.strip()
 
         if kw.endswith(".ppn"):
-            self._porcupine = pvporcupine.create(
+            # Detect language from filename (e.g. "_ko_" → porcupine_params_ko.pv)
+            import os, re
+            _lib_common = os.path.join(
+                os.path.dirname(pvporcupine.__file__), "lib", "common"
+            )
+            _lang_match = re.search(r"_([a-z]{2})_", os.path.basename(kw))
+            _model_path: str | None = None
+            if _lang_match:
+                _lang = _lang_match.group(1)
+                _candidate = os.path.join(_lib_common, f"porcupine_params_{_lang}.pv")
+                if os.path.isfile(_candidate):
+                    _model_path = _candidate
+                    log.info("porcupine: using language model %s", _candidate)
+                else:
+                    log.warning(
+                        "porcupine: model file not found for language '%s' (%s); "
+                        "falling back to default English model",
+                        _lang, _candidate,
+                    )
+            create_kwargs: dict = dict(
                 access_key=access_key.strip(),
                 keyword_paths=[kw],
                 sensitivities=[sens],
             )
+            if _model_path:
+                create_kwargs["model_path"] = _model_path
+            self._porcupine = pvporcupine.create(**create_kwargs)
         else:
             self._porcupine = pvporcupine.create(
                 access_key=access_key.strip(),

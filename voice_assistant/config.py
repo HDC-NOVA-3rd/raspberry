@@ -73,7 +73,9 @@ class AssistantConfig:
     silence_ms: int                    # trailing silence to end recording
     max_record_seconds: float
     min_speech_ms: int
-
+    stt_input_device: int | None       # sounddevice index for STT recording (None = default)
+    stt_start_level: int               # energy level to trigger speech start
+    stt_end_level: int                 # energy level for silence detection
     # ── TTS ─────────────────────────────────────────────────────────────
     tts_rate: int
     tts_voice: str
@@ -117,6 +119,9 @@ class AssistantConfig:
             silence_ms=_env_int("SILENCE_MS", 700),
             max_record_seconds=_env_float("MAX_RECORD_SECONDS", 12.0),
             min_speech_ms=_env_int("MIN_SPEECH_MS", 300),
+            stt_input_device=_env_optional_int("STT_INPUT_DEVICE"),
+            stt_start_level=_env_int("STT_START_LEVEL", 800),
+            stt_end_level=_env_int("STT_END_LEVEL", 400),
             # TTS
             tts_rate=_env_int("TTS_RATE", 170),
             tts_voice=_env("TTS_VOICE", "ko"),

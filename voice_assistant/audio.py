@@ -26,10 +26,13 @@ log = logging.getLogger(__name__)
 class AudioSettings:
     sample_rate: int = 16000
     frame_duration_ms: int = 30        # 10 | 20 | 30
-    vad_aggressiveness: int = 2        # 0‒3  (higher = more aggressive)
+    vad_aggressiveness: int = 1        # 0‒3  (higher = more aggressive)
     silence_ms: int = 700              # trailing silence to stop
     max_record_seconds: float = 12.0
     min_speech_ms: int = 300           # minimum speech to accept
+    input_device: int | None = None    # sounddevice input device index (None = default)
+    start_level_threshold: int = 800   # energy level to trigger speech start
+    end_level_threshold: int = 400     # energy level for silence detection
 
 
 # ---------------------------------------------------------------------------
@@ -66,9 +69,22 @@ class VADRecorder:
         self._min_speech = max(1, settings.min_speech_ms // settings.frame_duration_ms)
         self._max_frames = int(settings.max_record_seconds * 1000 / settings.frame_duration_ms)
         # Fallback thresholds for environments where VAD misses real speech.
-        self._start_level_threshold = 180
-        self._accept_level_threshold = 90
-        self._end_level_threshold = 70
+        self._start_level_threshold = settings.start_level_threshold
+        self._accept_level_threshold = max(300, settings.end_level_threshold // 2)
+        self._end_level_threshold = settings.end_level_threshold
+        # 이전 턴에서 측정한 노이즈 플로어 캐시 (두 번째 턴부터 캘리브레이션 생략)
+        self._cached_noise_floor: int = 0
+        self._cached_start_thr: int = 0
+        self._cached_end_thr: int = 0
+        log.info(
+            "VADRecorder init — device=%s start_thr=%d end_thr=%d",
+            settings.input_device, self._start_level_threshold, self._end_level_threshold,
+        )
+
+    @property
+    def has_noise_cache(self) -> bool:
+        """캐시된 노이즈 플로어가 있으면 True (pipeline이 sleep 시간 조정에 활용)"""
+        return self._cached_noise_floor > 0
 
     # ---- internal frame generator -------------------------------------------
 
@@ -82,13 +98,16 @@ class VADRecorder:
             q.put(bytes(indata))
 
         try:
-            with sd.RawInputStream(
+            stream_kwargs: dict = dict(
                 samplerate=self._s.sample_rate,
                 blocksize=self._samples_per_frame,
                 channels=1,
                 dtype="int16",
                 callback=_cb,
-            ):
+            )
+            if self._s.input_device is not None:
+                stream_kwargs["device"] = self._s.input_device
+            with sd.RawInputStream(**stream_kwargs):
                 while True:
                     chunk = q.get()
                     if len(chunk) < self._bytes_per_frame:
@@ -114,9 +133,21 @@ class VADRecorder:
         silence_run = 0
 
         # Calibrate noise floor from first 30 frames (~0.9s) before speech starts
-        _calibrated = False
-        start_level_threshold = self._start_level_threshold
-        end_level_threshold = self._end_level_threshold
+        # 캐시된 값이 있으면 즉시 사용 (첫 턴 이후 캘리브레이션 생략 → 응답 지연 0.9s 단축)
+        if self._cached_noise_floor > 0:
+            _calibrated = True
+            _calibrated_noise_floor = self._cached_noise_floor
+            start_level_threshold = self._cached_start_thr
+            end_level_threshold = self._cached_end_thr
+            log.info(
+                "noise floor cache hit: median=%d start_thr=%d end_thr=%d",
+                _calibrated_noise_floor, start_level_threshold, end_level_threshold,
+            )
+        else:
+            _calibrated = False
+            _calibrated_noise_floor = 0
+            start_level_threshold = self._start_level_threshold
+            end_level_threshold = self._end_level_threshold
 
         for idx, frame in enumerate(self._frames()):
             is_speech = self._vad.is_speech(frame, self._s.sample_rate)
@@ -131,18 +162,30 @@ class VADRecorder:
                         noise_floor = pre_levels[len(pre_levels) // 2]
                         # 노이즈 최댓값도 고려 (중앙값 대신 상위 80% 사용)
                         noise_p80 = pre_levels[int(len(pre_levels) * 0.8)]
-                        # start: 음성이 노이즈보다 확실히 커야 트리거
-                        start_level_threshold = max(
-                            self._start_level_threshold,
-                            int(noise_p80 * 2.5),
+                        # start: noise_p80 * 1.8 + 절대 상한 2500
+                        # (TTS 잔향으로 p80이 비정상적으로 높아져도 과도한 임계값 방지)
+                        start_level_threshold = min(
+                            max(
+                                self._start_level_threshold,
+                                int(noise_p80 * 1.8),
+                            ),
+                            2500,
                         )
-                        # end: 묵음 판정 기준 (노이즈 p80 * 1.6)
-                        end_level_threshold = max(
-                            self._end_level_threshold,
-                            int(noise_p80 * 1.6),
+                        # end: 묵음 판정 기준 (노이즈 p80 * 1.2, 상한 1500)
+                        end_level_threshold = min(
+                            max(
+                                self._end_level_threshold,
+                                int(noise_p80 * 1.2),
+                            ),
+                            1500,
                         )
+                        _calibrated_noise_floor = noise_floor
                         _calibrated = True
-                        log.debug(
+                        # 캐시 갱신
+                        self._cached_noise_floor = noise_floor
+                        self._cached_start_thr = start_level_threshold
+                        self._cached_end_thr = end_level_threshold
+                        log.info(
                             "noise floor calibrated: median=%d p80=%d start_thr=%d end_thr=%d",
                             noise_floor, noise_p80, start_level_threshold, end_level_threshold,
                         )
@@ -150,11 +193,14 @@ class VADRecorder:
                         # 캘리브레이션 미완료 — 트리거 검사 건너뜀
                         continue
 
-                # 시작 조건: 에너지 레벨 기반 (VAD는 노이즈에 취약하므로 보조 수단)
+                # 시작 조건: 에너지 OR WebRTC VAD (둘 중 하나라도 충족 시 시작)
                 energy_trigger = level >= start_level_threshold
-                if energy_trigger:
-                    log.debug("recording started: level=%d vad=%s start_thr=%d end_thr=%d",
-                              level, is_speech, start_level_threshold, end_level_threshold)
+                # vad_trigger: VAD가 발화로 판정 + 노이즈 플로어의 1.2배 이상
+                vad_noise_thr = max(self._end_level_threshold, int(_calibrated_noise_floor * 1.2))
+                vad_trigger = is_speech and level >= vad_noise_thr
+                if energy_trigger or vad_trigger:
+                    log.info("recording started: level=%d vad=%s energy_trigger=%s vad_trigger=%s start_thr=%d end_thr=%d",
+                             level, is_speech, energy_trigger, vad_trigger, start_level_threshold, end_level_threshold)
                     started = True
                     recorded.extend(pre_roll)
                     speech_count += 1

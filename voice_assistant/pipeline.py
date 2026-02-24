@@ -50,6 +50,9 @@ class VoiceAssistantPipeline:
                 silence_ms=config.silence_ms,
                 max_record_seconds=config.max_record_seconds,
                 min_speech_ms=config.min_speech_ms,
+                input_device=config.stt_input_device,
+                start_level_threshold=config.stt_start_level,
+                end_level_threshold=config.stt_end_level,
             )
         )
 
@@ -111,8 +114,10 @@ class VoiceAssistantPipeline:
             return
 
         self._tts.speak(self._cfg.greeting_text)
-        # TTS 잔향이 마이크에 잡혀 캘리브레이션을 오염시키지 않도록 잠시 대기
-        time.sleep(0.5)
+        # 캐시된 노이즈 플로어가 있으면 짧게 대기 (잔향 제거 최소화)
+        # 첫 턴은 1.5s (캘리브레이션 전 잔향 방지), 이후 턴은 0.3s
+        post_tts_sleep = 0.3 if self._recorder.has_noise_cache else 1.5
+        time.sleep(post_tts_sleep)
 
         try:
             wav = self._recorder.record_until_silence()
