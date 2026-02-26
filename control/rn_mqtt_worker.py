@@ -42,21 +42,14 @@ BROKER_PORT = env_int("MQTT_BROKER_PORT", 1883)
 MQTT_USERNAME = os.getenv("MQTT_USERNAME")
 MQTT_PASSWORD = os.getenv("MQTT_PASSWORD")
 
-HO_ID = env("HO_ID", "1")  # 문자열로 유지 (토픽 구성용)
+HO_ID = env("HO_ID", "1")
 MQTT_CLIENT_ID = env("MQTT_CLIENT_ID", f"rn_pi_{int(time.time())}")
 
-# (선택) 스냅샷 적용 방 목록을 env로도 조정 가능
-# 예: ROOM_IDS=1,2,3
 ROOM_IDS_RAW = os.getenv("ROOM_IDS", "1,2,3")
 ROOM_IDS = [int(x.strip()) for x in ROOM_IDS_RAW.split(",") if x.strip().isdigit()]
 
-# 모드/디바이스 토픽
 TOPIC_DEVICE_REQ = f"hdc/{HO_ID}/room/+/device/execute/req"
-
-# 응답 토픽 (room 분리)
 TOPIC_RES_TEMPLATE = f"hdc/{HO_ID}/room/{{roomId}}/device/execute/res"
-
-# 센서 값 전송
 TOPIC_ENV_TEMPLATE = f"hdc/{HO_ID}/room/{{roomId}}/env/data"
 
 # ===== GPIO =====
@@ -67,6 +60,18 @@ FAN_PINS = {
     (3, 1): 22, (3, 2): 5,
 }
 DHT_PINS = {1: board.D25, 2: board.D12, 3: board.D16}
+
+# 난방/냉방 표시등(빨강/파랑) GPIO(BCM) 핀 매핑
+STATUS_LED_PINS = {
+    (1, "RED"): 6,
+    (1, "BLUE"): 21,
+
+    (2, "RED"): 18,
+    (2, "BLUE"): 19,
+
+    (3, "RED"): 14, 
+    (3, "BLUE"): 15,
+}
 
 class RNMqttWorker:
     def __init__(self):
@@ -83,6 +88,9 @@ class RNMqttWorker:
         self.led_map = {rid: LED(pin) for rid, pin in LED_PINS.items()}
         self.fan_map = {(rid, idx): Fan(pin) for (rid, idx), pin in FAN_PINS.items()}
 
+        # 난방/냉방 표시등(빨강/파랑)
+        self.status_led_map = {(rid, color): LED(pin) for (rid, color), pin in STATUS_LED_PINS.items()}
+
     def parse_device_code(self, device_code: str):
         if device_code.startswith("light-"):
             room_id = int(device_code.split("-")[1])
@@ -98,6 +106,13 @@ class RNMqttWorker:
             room_id = int(device_code.split("-")[1])
             return ("AIRCON", room_id, None)
 
+        # RN 표시등: red-led-{roomId}, blue-led-{roomId}
+        if device_code.startswith("red-led-"):
+            return ("STATUS_LED", None, "RED")
+
+        if device_code.startswith("blue-led-"):
+            return ("STATUS_LED", None, "BLUE")
+
         return (None, None, None)
 
     def on_connect(self, client, userdata, flags, rc):
@@ -110,7 +125,6 @@ class RNMqttWorker:
         raw = msg.payload.decode(errors="ignore").strip()
         print("[MQTT] recv:", topic, raw)
 
-        # 기대: hdc/{HO_ID}/room/{roomId}/device/execute/req
         try:
             parts = topic.split("/")
             if len(parts) < 7:
@@ -143,18 +157,22 @@ class RNMqttWorker:
             self.publish_result(room_id, trace_id, "FAIL", "missing deviceCode/command")
             return
 
+        def parse_on(v):
+            return (v is True) or (str(v).upper() == "ON") or (str(v) == "1") or (str(v).upper() == "TRUE")
+
         try:
-            dtype, rid, fan_idx = self.parse_device_code(device_code)
+            dtype, rid, extra = self.parse_device_code(device_code)
             if not dtype:
                 self.publish_result(room_id, trace_id, "FAIL", f"unknown deviceCode={device_code}")
                 return
 
-            if rid != room_id:
+            # STATUS_LED는 deviceCode 숫자 대신 토픽 room_id 기준으로 동작
+            if dtype == "STATUS_LED":
+                rid = room_id
+
+            if dtype != "STATUS_LED" and rid != room_id:
                 self.publish_result(room_id, trace_id, "FAIL", f"room mismatch topic={room_id} code={rid}")
                 return
-
-            def parse_on(v):
-                return (v is True) or (str(v).upper() == "ON") or (str(v) == "1") or (str(v).upper() == "TRUE")
 
             if dtype == "LED" and command == "POWER":
                 led = self.led_map.get(rid)
@@ -181,6 +199,7 @@ class RNMqttWorker:
             elif dtype == "FAN" and command == "POWER":
                 on = parse_on(value)
 
+                fan_idx = extra
                 if fan_idx is None:
                     f1 = self.fan_map.get((rid, 1))
                     f2 = self.fan_map.get((rid, 2))
@@ -212,6 +231,16 @@ class RNMqttWorker:
                     f1.off(); f2.off()
                 self.publish_result(room_id, trace_id, "SUCCESS", f"{device_code} power={on} -> FAN1,FAN2 synced")
 
+            elif dtype == "STATUS_LED" and command == "POWER":
+                color = extra  # "RED" or "BLUE"
+                led = self.status_led_map.get((rid, color))
+                if not led:
+                    self.publish_result(room_id, trace_id, "FAIL", f"no STATUS_LED {color} for room {rid}")
+                    return
+                on = parse_on(value)
+                led.led_on() if on else led.led_off()
+                self.publish_result(room_id, trace_id, "SUCCESS", f"{device_code} power={on}")
+
             else:
                 self.publish_result(room_id, trace_id, "FAIL", f"unsupported: {device_code}/{command}")
 
@@ -220,10 +249,8 @@ class RNMqttWorker:
             self.publish_result(room_id, trace_id, "FAIL", str(e))
 
     def apply_snapshot(self):
-        # 서버 스냅샷으로 Pi 상태 복구
         for room_id in ROOM_IDS:
             try:
-                # ✅ 네 스프링 컨트롤러는 /api/room/{roomId}/snapshot
                 url = f"{API_BASE}/room/{room_id}/snapshot"
                 print("[SNAPSHOT] try:", url)
                 res = requests.get(url, timeout=5)
@@ -331,6 +358,8 @@ class RNMqttWorker:
                 for f in self.fan_map.values():
                     f.cleanup()
                 for l in self.led_map.values():
+                    l.cleanup()
+                for l in self.status_led_map.values():
                     l.cleanup()
             except:
                 pass
