@@ -1,0 +1,10 @@
+paho-mqtt
+opencv-python-headless
+numpy
+pyzbar
+RPi.GPIO
+python-dotenv
+requests
+adafruit-circuitpython-dht
+gTTS
+pygame

@@ -1,0 +1,38 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.pyc
+
+# Virtual environments
+.venv/
+venv/
+ENV/
+myenv/
+
+# Packaging
+build/
+dist/
+*.egg-info/
+
+# Logs and temp files
+*.log
+*.tmp
+*.swp
+.DS_Store
+
+# Jupyter
+.ipynb_checkpoints/
+
+# VS Code
+.vscode/
+
+# Node (if present)
+node_modules/
+
+# Secrets/configs (adjust if you need to track them)
+.env
+.env.*
+
+# MQTT / runtime artifacts (if any)
+*.db
